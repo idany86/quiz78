@@ -276,7 +276,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
   <div class="q-area" id="q-area"></div>
   <div class="bottom-bar">
     <button class="hbtn" onclick="revealAnswer()">📋 גלה תשובה</button>
-    <button class="hbtn gold" onclick="nextQ()">שאלה הבאה ▶</button>
+    <button class="hbtn gold" onclick="revealAnswer()">📊 טבלת ניקוד ▶</button>
     <button class="hbtn" id="pauseBtn" onclick="togglePause()">⏸ השהה</button>
     <button class="hbtn" onclick="if(confirm('לסיים?'))endGame()">🏁 סיום</button>
   </div>
@@ -731,7 +731,7 @@ function listenAsPlayer() {
     G.scores = data.scores || G.scores;
 
     if(data.gameOver) { showFinalPlayer(data); return; }
-    if(data.state === 'question') { renderPlayerQ(data); }
+    if(data.state === 'question') { G.playerAnswered=false; G.currentQi=data.qi||0; renderPlayerQ(data); }
     else if(data.state === 'reveal') { renderPlayerReveal(data); }
     else { renderPlayerWaiting(); }
   });
@@ -769,10 +769,13 @@ window.loadQ = function() {
   if(G.qi >= QS.length) { endGame(); return; }
   var q = QS[G.qi];
   G.answered = false;
+  G.playerAnswered = false;
+  G.currentQi = G.qi;
 
   document.getElementById('prog').style.width = ((G.qi/QS.length)*100)+'%';
 
   // push to Firebase
+  G.qStartTime = Date.now();
   update(G.roomRef, {
     qi: G.qi,
     state: 'question',
@@ -898,21 +901,50 @@ window.revealAnswer = function() {
   var bonusEl = document.querySelector('.ov-box > div[style*="ניקוד בסיס"]');
   if(bonusEl) bonusEl.innerHTML = '⚡ ניקוד בסיס: <strong style="color:#ffd700">100 נק\'</strong> + בונוס מהירות: <strong style="color:#4aff4a">+'+speedBonus+' נק\'</strong> = <strong style="color:#ffd700">'+pts+' נק\'</strong>';
 
-  document.getElementById('score-chips').innerHTML = G.teams.map(function(t,i){
-    return '<div class="chip off" id="chip-'+i+'" onclick="toggleChip('+i+','+pts+')">'
-      +'<span class="chip-label">'+t+'</span><span class="chip-pts" id="cpts-'+i+'">+0</span></div>';
-  }).join('');
+  // Read player answers from Firebase and auto-calculate scores
+  get(ref(db,'rooms/'+G.roomCode+'/answers')).then(function(snap){
+    var answers = snap.exists() ? snap.val() : {};
+    var correct = q.correct;
+    // For TF: correct is boolean (true/false), stored as 1/0
+    G.pendingScore = {};
+    Object.values(answers).forEach(function(ans){
+      if(ans.qi !== G.qi) return; // stale answer
+      var isCorrect = (q.type==='tf') ? (ans.answer===(correct?1:0)) : (ans.answer===correct);
+      if(isCorrect){
+        // Calculate speed bonus based on answer time vs question start time
+        var elapsed = (ans.time - (G.qStartTime||ans.time)) / 1000;
+        var timeLeft = Math.max(0, q.time - elapsed);
+        var bonus = Math.round((timeLeft/q.time)*50);
+        var teamPts = 100 + bonus;
+        // Take highest score if team answered multiple times
+        if(!G.pendingScore[ans.team] || teamPts > G.pendingScore[ans.team]){
+          G.pendingScore[ans.team] = teamPts;
+        }
+      }
+    });
 
-  // Show current scores
-  var SCLS2 = ['sc0','sc1','sc2','sc3'];
-  document.getElementById('ov-scores-bar').innerHTML = G.teams.map(function(t,i){
-    return '<div class="sc-card '+SCLS2[i]+'" style="min-width:80px;padding:8px 12px">'
-      +'<div class="sc-name" style="font-size:11px">'+t+'</div>'
-      +'<div class="sc-pts" style="font-size:22px">'+G.scores[i]+'</div>'
-      +'</div>';
-  }).join('');
+    var SCLS2=['sc0','sc1','sc2','sc3'];
+    document.getElementById('score-chips').innerHTML = G.teams.map(function(t,i){
+      var earned = G.pendingScore[i]||0;
+      var cls = earned>0 ? 'chip on' : 'chip off';
+      return '<div class="chip '+cls+'" id="chip-'+i+'" onclick="toggleChip('+i+','+pts+')">'
+        +'<span class="chip-label">'+t+'</span>'
+        +'<span class="chip-pts" id="cpts-'+i+'">'+(earned>0?'+'+earned:'+0')+'</span></div>';
+    }).join('');
 
-  document.getElementById('overlay').classList.add('open');
+    document.getElementById('ov-scores-bar').innerHTML = G.teams.map(function(t,i){
+      var delta = G.pendingScore[i]||0;
+      return '<div class="sc-card '+SCLS2[i]+'" style="min-width:80px;padding:8px 12px">'
+        +'<div class="sc-name" style="font-size:11px">'+t+'</div>'
+        +'<div class="sc-pts" style="font-size:20px">'+(G.scores[i]+delta)
+        +(delta>0?'<span style="color:#4aff4a;font-size:13px"> +'+delta+'</span>':'')+'</div>'
+        +'</div>';
+    }).join('');
+
+    // Clear answers for next question
+    set(ref(db,'rooms/'+G.roomCode+'/answers'),null);
+    document.getElementById('overlay').classList.add('open');
+  }).catch(function(){ document.getElementById('overlay').classList.add('open'); });
 };
 
 window.toggleChip = function(i,pts) {
@@ -1015,17 +1047,26 @@ function renderPlayerWaiting() {
 }
 
 window.playerAnswer = function(i) {
+  if(G.playerAnswered) return;
+  G.playerAnswered = true;
   var btns = document.querySelectorAll('.player-ans-btn');
   btns.forEach(function(b){ b.disabled=true; b.style.opacity='0.6'; });
   var picked = document.getElementById('pa'+i);
   if(picked){ picked.style.opacity='1'; picked.classList.add('picked'); }
+  // Record answer + timestamp to Firebase
+  var ansRef = ref(db,'rooms/'+G.roomCode+'/answers/'+G.playerTeam);
+  set(ansRef, {answer:i, time:Date.now(), team:G.playerTeam, qi:G.currentQi||0});
 };
 
 window.playerAnswerTF = function(v) {
+  if(G.playerAnswered) return;
+  G.playerAnswered = true;
   var bt=document.getElementById('ptf-t'), bf=document.getElementById('ptf-f');
   if(bt) bt.disabled=true; if(bf) bf.disabled=true;
   var picked = v?bt:bf;
   if(picked){ picked.style.opacity='1'; picked.classList.add('picked'); }
+  var ansRef = ref(db,'rooms/'+G.roomCode+'/answers/'+G.playerTeam);
+  set(ansRef, {answer:v?1:0, time:Date.now(), team:G.playerTeam, qi:G.currentQi||0});
 };
 
 function showFinalPlayer(data) {
