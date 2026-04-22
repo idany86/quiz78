@@ -285,13 +285,17 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 <!-- ===== OVERLAY ===== -->
 <div id="overlay">
   <div class="ov-box">
-    <div class="ov-heading">התשובה הנכונה</div>
+    <div class="ov-heading">✅ התשובה הנכונה</div>
     <div class="ov-answer" id="ov-answer"></div>
     <div class="ov-explain" id="ov-explain"></div>
+    <div style="background:rgba(255,215,0,.12);border:1px solid rgba(255,215,0,.3);border-radius:10px;padding:8px 14px;margin-bottom:10px;font-size:12px;color:rgba(255,255,255,.7);text-align:center">
+      ⚡ ניקוד בסיס: <strong style="color:#ffd700">100 נק'</strong> + בונוס מהירות עד <strong style="color:#ffd700">+50 נק'</strong>
+    </div>
     <div class="ov-note">לחצו על הקבוצות שענו נכון:</div>
     <div class="score-chips" id="score-chips"></div>
-    <button class="btn btn-gold" style="max-width:200px" onclick="closeOverlay()">שאלה הבאה ▶</button>
-    <button class="btn btn-ghost" style="max-width:200px;margin-top:8px" onclick="closeOverlayStay()">סגור</button>
+    <div id="ov-scores-bar" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:10px 0"></div>
+    <button class="btn btn-gold" style="max-width:220px" onclick="closeOverlay()">שאלה הבאה ▶</button>
+    <button class="btn btn-ghost" style="max-width:220px;margin-top:8px" onclick="closeOverlayStay()">סגור</button>
   </div>
 </div>
 
@@ -846,7 +850,7 @@ function startTimer(sec) {
   G.timer = setInterval(function(){
     if(G.paused||G.answered) return;
     G.timeLeft--; updateTimer();
-    if(G.timeLeft<=0) clearInterval(G.timer);
+    if(G.timeLeft<=0){ clearInterval(G.timer); if(!G.answered) revealAnswer(); }
   },1000);
 }
 
@@ -884,15 +888,28 @@ window.revealAnswer = function() {
   }
 
   var speedBonus = Math.round((G.timeLeft/G.totalTime)*50);
-  var pts = (q.time<=15?80:q.time<=25?100:130)+speedBonus;
+  var pts = 100 + speedBonus;
 
   var ansText = q.type==='tf'?(q.correct?'✅ נכון':'❌ לא נכון'):(q.opts?q.opts[q.correct]:'—');
   document.getElementById('ov-answer').textContent = ansText;
   document.getElementById('ov-explain').textContent = q.explain||'';
 
+  // Show speed bonus earned this round
+  var bonusEl = document.querySelector('.ov-box > div[style*="ניקוד בסיס"]');
+  if(bonusEl) bonusEl.innerHTML = '⚡ ניקוד בסיס: <strong style="color:#ffd700">100 נק\'</strong> + בונוס מהירות: <strong style="color:#4aff4a">+'+speedBonus+' נק\'</strong> = <strong style="color:#ffd700">'+pts+' נק\'</strong>';
+
   document.getElementById('score-chips').innerHTML = G.teams.map(function(t,i){
     return '<div class="chip off" id="chip-'+i+'" onclick="toggleChip('+i+','+pts+')">'
       +'<span class="chip-label">'+t+'</span><span class="chip-pts" id="cpts-'+i+'">+0</span></div>';
+  }).join('');
+
+  // Show current scores
+  var SCLS2 = ['sc0','sc1','sc2','sc3'];
+  document.getElementById('ov-scores-bar').innerHTML = G.teams.map(function(t,i){
+    return '<div class="sc-card '+SCLS2[i]+'" style="min-width:80px;padding:8px 12px">'
+      +'<div class="sc-name" style="font-size:11px">'+t+'</div>'
+      +'<div class="sc-pts" style="font-size:22px">'+G.scores[i]+'</div>'
+      +'</div>';
   }).join('');
 
   document.getElementById('overlay').classList.add('open');
@@ -901,6 +918,17 @@ window.revealAnswer = function() {
 window.toggleChip = function(i,pts) {
   if(G.pendingScore[i]){ delete G.pendingScore[i]; document.getElementById('chip-'+i).className='chip off'; document.getElementById('cpts-'+i).textContent='+0'; }
   else { G.pendingScore[i]=pts; document.getElementById('chip-'+i).className='chip on'; document.getElementById('cpts-'+i).textContent='+'+pts; }
+  // refresh scores preview in overlay
+  var SCLS2=['sc0','sc1','sc2','sc3'];
+  var bar=document.getElementById('ov-scores-bar');
+  if(bar) bar.innerHTML = G.teams.map(function(t,idx){
+    var preview = G.scores[idx]+(G.pendingScore[idx]||0);
+    var delta = G.pendingScore[idx]?(' <span style="color:#4aff4a;font-size:13px">+'+G.pendingScore[idx]+'</span>'):'';
+    return '<div class="sc-card '+SCLS2[idx]+'" style="min-width:80px;padding:8px 12px">'
+      +'<div class="sc-name" style="font-size:11px">'+t+'</div>'
+      +'<div class="sc-pts" style="font-size:20px">'+preview+delta+'</div>'
+      +'</div>';
+  }).join('');
 };
 
 function applyScores() {
