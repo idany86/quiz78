@@ -731,7 +731,7 @@ function listenAsPlayer() {
     G.scores = data.scores || G.scores;
 
     if(data.gameOver) { showFinalPlayer(data); return; }
-    if(data.state === 'question') { G.playerAnswered=false; G.currentQi=data.qi||0; renderPlayerQ(data); }
+    if(data.state === 'question') { G.playerAnswered=false; G.currentQi=data.qi||0; G.qStartTime=data.qStartTime||Date.now(); renderPlayerQ(data); }
     else if(data.state === 'reveal') { renderPlayerReveal(data); }
     else { renderPlayerWaiting(); }
   });
@@ -780,6 +780,7 @@ window.loadQ = function() {
     qi: G.qi,
     state: 'question',
     reveal: false,
+    qStartTime: G.qStartTime,
     currentQ: {
       id: q.id, cat: q.cat, type: q.type, time: q.time,
       text: q.text,
@@ -878,73 +879,77 @@ window.revealAnswer = function() {
   G.answered = true; clearInterval(G.timer);
   G.pendingScore = {};
 
-  update(G.roomRef, { state:'reveal', reveal:true, correctAnswer: q.correct });
+  update(G.roomRef, {state:'reveal', reveal:true, correctAnswer:q.correct});
 
-  if(q.type!=='tf'&&q.opts) {
+  // Highlight correct/wrong on host screen
+  if(q.type!=='tf'&&q.opts){
     for(var i=0;i<q.opts.length;i++){
       var b=document.getElementById('ans-'+i); if(!b) continue;
       b.classList.add(i===q.correct?'rev-ok':'rev-no');
     }
   } else if(q.type==='tf'){
-    var bt=document.getElementById('ans-true'), bf=document.getElementById('ans-false');
-    if(bt&&bf){ (q.correct?bt:bf).classList.add('rev-ok'); (q.correct?bf:bt).classList.add('rev-no'); }
+    var bt=document.getElementById('ans-true'),bf=document.getElementById('ans-false');
+    if(bt&&bf){(q.correct?bt:bf).classList.add('rev-ok');(q.correct?bf:bt).classList.add('rev-no');}
   }
-
-  var speedBonus = Math.round((G.timeLeft/G.totalTime)*50);
-  var pts = 100 + speedBonus;
 
   var ansText = q.type==='tf'?(q.correct?'✅ נכון':'❌ לא נכון'):(q.opts?q.opts[q.correct]:'—');
   document.getElementById('ov-answer').textContent = ansText;
   document.getElementById('ov-explain').textContent = q.explain||'';
 
-  // Show speed bonus earned this round
-  var bonusEl = document.querySelector('.ov-box > div[style*="ניקוד בסיס"]');
-  if(bonusEl) bonusEl.innerHTML = '⚡ ניקוד בסיס: <strong style="color:#ffd700">100 נק\'</strong> + בונוס מהירות: <strong style="color:#4aff4a">+'+speedBonus+' נק\'</strong> = <strong style="color:#ffd700">'+pts+' נק\'</strong>';
-
-  // Read player answers from Firebase and auto-calculate scores
+  // Read all player answers from Firebase, calculate scores by speed
   get(ref(db,'rooms/'+G.roomCode+'/answers')).then(function(snap){
-    var answers = snap.exists() ? snap.val() : {};
-    var correct = q.correct;
-    // For TF: correct is boolean (true/false), stored as 1/0
     G.pendingScore = {};
-    Object.values(answers).forEach(function(ans){
-      if(ans.qi !== G.qi) return; // stale answer
-      var isCorrect = (q.type==='tf') ? (ans.answer===(correct?1:0)) : (ans.answer===correct);
-      if(isCorrect){
-        // Calculate speed bonus based on answer time vs question start time
-        var elapsed = (ans.time - (G.qStartTime||ans.time)) / 1000;
+    if(snap.exists()){
+      var answers = snap.val();
+      Object.values(answers).forEach(function(ans){
+        // Skip answers for wrong question
+        if((ans.qi||0) !== G.qi) return;
+        // Check correctness
+        var isCorrect = (q.type==='tf')
+          ? (ans.answer === (q.correct ? 1 : 0))
+          : (ans.answer === q.correct);
+        if(!isCorrect) return;
+        // Calculate score: base 100 + speed bonus up to 50
+        var qStart = ans.qStart || G.qStartTime || ans.time;
+        var elapsed = Math.max(0, (ans.time - qStart) / 1000);
         var timeLeft = Math.max(0, q.time - elapsed);
-        var bonus = Math.round((timeLeft/q.time)*50);
-        var teamPts = 100 + bonus;
-        // Take highest score if team answered multiple times
-        if(!G.pendingScore[ans.team] || teamPts > G.pendingScore[ans.team]){
-          G.pendingScore[ans.team] = teamPts;
+        var bonus = Math.round((timeLeft / q.time) * 50);
+        var pts = 100 + bonus;
+        // Keep highest per team
+        var t = ans.team;
+        if(G.pendingScore[t] === undefined || pts > G.pendingScore[t]){
+          G.pendingScore[t] = pts;
         }
-      }
-    });
+      });
+    }
 
+    // Clear answers node for next question
+    set(ref(db,'rooms/'+G.roomCode+'/answers'), null);
+
+    // Build overlay chips + scores
     var SCLS2=['sc0','sc1','sc2','sc3'];
     document.getElementById('score-chips').innerHTML = G.teams.map(function(t,i){
       var earned = G.pendingScore[i]||0;
-      var cls = earned>0 ? 'chip on' : 'chip off';
-      return '<div class="chip '+cls+'" id="chip-'+i+'" onclick="toggleChip('+i+','+pts+')">'
+      return '<div class="chip '+(earned>0?'on':'off')+'" id="chip-'+i+'" onclick="toggleChip('+i+','+(earned>0?earned:100)+')">'
         +'<span class="chip-label">'+t+'</span>'
         +'<span class="chip-pts" id="cpts-'+i+'">'+(earned>0?'+'+earned:'+0')+'</span></div>';
     }).join('');
 
-    document.getElementById('ov-scores-bar').innerHTML = G.teams.map(function(t,i){
+    var bar = document.getElementById('ov-scores-bar');
+    if(bar) bar.innerHTML = G.teams.map(function(t,i){
       var delta = G.pendingScore[i]||0;
       return '<div class="sc-card '+SCLS2[i]+'" style="min-width:80px;padding:8px 12px">'
         +'<div class="sc-name" style="font-size:11px">'+t+'</div>'
         +'<div class="sc-pts" style="font-size:20px">'+(G.scores[i]+delta)
-        +(delta>0?'<span style="color:#4aff4a;font-size:13px"> +'+delta+'</span>':'')+'</div>'
+        +(delta>0?'<span style="color:#4aff4a;font-size:12px"> +'+delta+'</span>':'')+'</div>'
         +'</div>';
     }).join('');
 
-    // Clear answers for next question
-    set(ref(db,'rooms/'+G.roomCode+'/answers'),null);
     document.getElementById('overlay').classList.add('open');
-  }).catch(function(){ document.getElementById('overlay').classList.add('open'); });
+  }).catch(function(e){
+    console.error('Error reading answers:', e);
+    document.getElementById('overlay').classList.add('open');
+  });
 };
 
 window.toggleChip = function(i,pts) {
@@ -1032,11 +1037,14 @@ function renderPlayerQ(data) {
 
 function renderPlayerReveal(data) {
   var area = document.getElementById('player-q-area');
+  var correctAns = data.correctAnswer;
+  var myScore = (data.scores && data.scores[G.playerTeam] !== undefined)
+    ? data.scores[G.playerTeam] : G.scores[G.playerTeam];
   area.innerHTML = '<div class="player-waiting">'
-    +'<div style="font-size:48px">📋</div>'
-    +'<div class="player-status">המגיש מגלה את התשובה...</div>'
-    +'<div style="font-size:20px;font-weight:900;color:#f5a623;margin-top:8px">'
-    +'ניקוד: '+G.scores[G.playerTeam]+'</div>'
+    +'<div style="font-size:44px">📊</div>'
+    +'<div class="player-status" style="font-size:18px;margin:6px 0">ניקוד הקבוצה שלך:</div>'
+    +'<div style="font-size:54px;font-weight:900;color:#ffd700;font-family:Frank Ruhl Libre,serif">'+myScore+'</div>'
+    +'<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-top:4px">ממתין לשאלה הבאה...</div>'
     +'</div>';
 }
 
@@ -1055,7 +1063,7 @@ window.playerAnswer = function(i) {
   if(picked){ picked.style.opacity='1'; picked.classList.add('picked'); }
   // Record answer + timestamp to Firebase
   var ansRef = ref(db,'rooms/'+G.roomCode+'/answers/'+G.playerTeam);
-  set(ansRef, {answer:i, time:Date.now(), team:G.playerTeam, qi:G.currentQi||0});
+  set(ansRef, {answer:i, time:Date.now(), team:G.playerTeam, qi:G.currentQi||0, qStart:G.qStartTime||0});
 };
 
 window.playerAnswerTF = function(v) {
@@ -1066,7 +1074,7 @@ window.playerAnswerTF = function(v) {
   var picked = v?bt:bf;
   if(picked){ picked.style.opacity='1'; picked.classList.add('picked'); }
   var ansRef = ref(db,'rooms/'+G.roomCode+'/answers/'+G.playerTeam);
-  set(ansRef, {answer:v?1:0, time:Date.now(), team:G.playerTeam, qi:G.currentQi||0});
+  set(ansRef, {answer:v?1:0, time:Date.now(), team:G.playerTeam, qi:G.currentQi||0, qStart:G.qStartTime||0});
 };
 
 function showFinalPlayer(data) {
